@@ -1,3 +1,6 @@
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 import json
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -18,6 +21,33 @@ chrome_options.add_argument("--remote-debugging-port=9222")
 # Path to ChromeDriver
 driver_path = '/home/thabomab/drivers/chromedriver-linux64/chromedriver'
 service = Service(executable_path=driver_path)
+
+def load_email_credentials(file_path):
+    with open(file_path, 'r') as file:
+        return json.load(file)
+
+# function to send email
+def send_email(subject, body, sender_email, sender_password, receiver_email): 
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = receiver_email  
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        # setting up smtp server
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+
+        # sending the email
+        server.sendmail(sender_email, receiver_email, msg.as_string())  
+        print("Email sent successfully!")
+    except Exception as e:
+        print(f"Error sending msg: {e}")
+    finally:
+        server.quit()
 
 # Load price selectors from the JSON file
 def load_price_selectors(file_path):
@@ -63,10 +93,12 @@ def check_price(url, selectors):
         print(f"Error finding the price on {domain}: {e}")
         return None
     finally:
-        driver.quit()
+        driver.quit()  
 
-def monitor_price(url, selectors):
+def monitor_price(url, selectors, email_config, receiver_email):
     initial_price = None
+    sender_email = email_config['sender_email']
+    sender_password = email_config['sender_password']
     while True:
         price = check_price(url, selectors)
 
@@ -78,10 +110,15 @@ def monitor_price(url, selectors):
                 if initial_price is None:
                     initial_price = price_value
                     print(f"Initial price: R{initial_price}")
+                    break 
                 else:
                     if price_value < initial_price:
                         print(f"Price dropped! Previous price: R{initial_price}, New price: R{price_value}")
-                        break  # Exit the loop after notifying
+                        subject = "Price Drop Alert!!"
+                        body = f"Your item is on Sale!\n\nClick the link to go to the item\n{url}"
+                        send_email(subject, body, sender_email, sender_password, receiver_email)
+                        # send email notification
+                        break
             except ValueError:
                 print(f"Error converting the price: {price}")
         else:
@@ -92,5 +129,8 @@ def monitor_price(url, selectors):
 
 if __name__ == "__main__":
     url = input("Enter the product URL: ")
+    receiver_email = input("Enter email: ")
     selectors = load_price_selectors('price_selectors.json')
-    monitor_price(url, selectors)
+    email_config = load_email_credentials('email_config.json')
+    monitor_price(url, selectors, email_config, receiver_email)
+
