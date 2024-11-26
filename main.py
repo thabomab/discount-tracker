@@ -1,136 +1,115 @@
+from flask import Flask, request, jsonify
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import json
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from urllib.parse import urlparse
 import time
+from urllib.parse import urlparse
+import threading
 
-# Setting up Chrome options
+app = Flask(__name__)
+
+# Set up Chrome options for Selenium
 chrome_options = Options()
 chrome_options.add_argument("--headless")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--remote-debugging-port=9222")
 
-# Path to ChromeDriver
 driver_path = '/home/thabomab/drivers/chromedriver-linux64/chromedriver'
-service = Service(executable_path=driver_path)
 
-def load_email_credentials(file_path):
+# Utility function to load JSON data
+def load_json(file_path):
     with open(file_path, 'r') as file:
         return json.load(file)
 
-# function to send email
-def send_email(subject, body, sender_email, sender_password, receiver_email): 
+selectors = load_json('price_selectors.json')
+email_config = load_json('email_config.json')
+
+# Email function
+def send_email(subject, body, sender_email, sender_password, receiver_email):
     msg = MIMEMultipart()
     msg['From'] = sender_email
-    msg['To'] = receiver_email  
+    msg['To'] = receiver_email
     msg['Subject'] = subject
-
     msg.attach(MIMEText(body, "plain"))
 
     try:
-        # setting up smtp server
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
         server.login(sender_email, sender_password)
-
-        # sending the email
-        server.sendmail(sender_email, receiver_email, msg.as_string())  
-        print("Email sent successfully!")
-    except Exception as e:
-        print(f"Error sending msg: {e}")
-    finally:
+        server.sendmail(sender_email, receiver_email, msg.as_string())
         server.quit()
+    except Exception as e:
+        print(f"Error sending email: {e}")
 
-# Load price selectors from the JSON file
-def load_price_selectors(file_path):
-    with open(file_path, 'r') as file:
-        return json.load(file)
-
-def get_domain(url):
-    parsed_url = urlparse(url)
-    domain = parsed_url.netloc
-
-    # Remove 'www.' if it's present in the domain
-    if domain.startswith("www."):
-        domain = domain[4:]
-        
-    return domain
-
-def get_price_selector(domain, selectors):
-    return selectors.get(domain)
-
+# Price tracking function
 def check_price(url, selectors):
-    # Initializes Chrome WebDriver
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver = webdriver.Chrome(service=webdriver.chrome.service.Service(driver_path), options=chrome_options)
     driver.get(url)
 
-    # Extracts domain and find corresponding price selector
-    domain = get_domain(url)
-    price_selector = get_price_selector(domain, selectors)  # Pass both domain and selectors
-    print(domain)
-    print(price_selector)
-
-    if price_selector is None:
-        print(f"No price selector defined for {domain}.")
+    domain = urlparse(url).netloc
+    selector = selectors.get(domain)
+    
+    if not selector:
         driver.quit()
         return None
 
     try:
-        # Waits for the price element to load and scrape it
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, price_selector)))
-        price_element = driver.find_element(By.CSS_SELECTOR, price_selector)
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+        price_element = driver.find_element(By.CSS_SELECTOR, selector)
         price = price_element.text
-        return price
+        return float(price.replace('R', '').replace(',', '').strip())
     except Exception as e:
-        print(f"Error finding the price on {domain}: {e}")
+        print(f"Error finding price on {domain}: {e}")
         return None
     finally:
-        driver.quit()  
+        driver.quit()
 
-def monitor_price(url, selectors, email_config, receiver_email):
-    initial_price = None
-    sender_email = email_config['sender_email']
-    sender_password = email_config['sender_password']
+# Background function to monitor price drop
+def track_price_drop(url, email, initial_price):
     while True:
-        price = check_price(url, selectors)
-
-        if price:
-            try:
-                # Clean and convert price to float
-                price_value = float(price.replace('R', '').replace(',', '').strip())  
-                
-                if initial_price is None:
-                    initial_price = price_value
-                    print(f"Initial price: R{initial_price}")
-                    break 
-                else:
-                    if price_value < initial_price:
-                        print(f"Price dropped! Previous price: R{initial_price}, New price: R{price_value}")
-                        subject = "Price Drop Alert!!"
-                        body = f"Your item is on Sale!\n\nClick the link to go to the item\n{url}"
-                        send_email(subject, body, sender_email, sender_password, receiver_email)
-                        # send email notification
-                        break
-            except ValueError:
-                print(f"Error converting the price: {price}")
-        else:
-            print("Price could not be found or an error occurred.")
+        current_price = check_price(url, selectors)
         
-        # Wait for 5 minutes before checking again
-        time.sleep(300)
+        if current_price is None:
+            print("Failed to retrieve price.")
+            time.sleep(300)  # Wait before retrying
+            continue
+
+        print(f"Current price: R{current_price}, Initial price: R{initial_price}")
+
+        if current_price < initial_price:
+            print("Price dropped!")
+            subject = "Price Drop Alert!"
+            body = f"The price for your product has dropped!\n\nNew price: R{current_price}\nCheck it out here: {url}"
+            send_email(subject, body, email_config['sender_email'], email_config['sender_password'], email)
+            break  # Stop tracking once the price drop email is sent
+
+        time.sleep(300)  # Check every 5 minutes
+
+@app.route('/track', methods=['POST'])
+def track_discount():
+    data = request.get_json()
+    url = data.get('url')
+    email = data.get('email')
+
+    if not url or not email:
+        return jsonify({"error": "URL and email are required"}), 400
+
+    initial_price = check_price(url, selectors)
+    if initial_price is None:
+        return jsonify({"error": "Failed to retrieve price"}), 500
+
+    # Start the price tracking in a background thread
+    thread = threading.Thread(target=track_price_drop, args=(url, email, initial_price))
+    thread.start()
+
+    return jsonify({"message": "Tracking started. You will be notified if the price drops."}), 200
 
 if __name__ == "__main__":
-    url = input("Enter the product URL: ")
-    receiver_email = input("Enter email: ")
-    selectors = load_price_selectors('price_selectors.json')
-    email_config = load_email_credentials('email_config.json')
-    monitor_price(url, selectors, email_config, receiver_email)
-
+    app.run(debug=True)
