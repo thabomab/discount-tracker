@@ -11,22 +11,34 @@ from selenium.webdriver.support import expected_conditions as EC
 import time
 from urllib.parse import urlparse
 import threading
+import logging
 
 app = Flask(__name__)
 
-# Set up Chrome options for Selenium
+# configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    filename="prcdrop.log"
+)
+
+# Setting up Chrome options for Selenium
 chrome_options = Options()
 chrome_options.add_argument("--headless")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--remote-debugging-port=9222")
 
-driver_path = '/home/thabomab/drivers/chromedriver-linux64/chromedriver'
+driver_path = '/home/thabomab/drivers/chromedriver-linux64/old_chromedriver'
 
 # Utility function to load JSON data
 def load_json(file_path):
-    with open(file_path, 'r') as file:
-        return json.load(file)
+    try:
+        with open(file_path, 'r') as file:
+            return json.load(file)
+    except Exception as e:
+        logging.error(f"Error loading Json File {file_path}: {e}")
 
 selectors = load_json('price_selectors.json')
 email_config = load_json('email_config.json')
@@ -46,7 +58,7 @@ def send_email(subject, body, sender_email, sender_password, receiver_email):
         server.sendmail(sender_email, receiver_email, msg.as_string())
         server.quit()
     except Exception as e:
-        print(f"Error sending email: {e}")
+        logging.error(f"Error sending email: {e}")
 
 # Price tracking function
 def check_price(url, selectors):
@@ -57,8 +69,11 @@ def check_price(url, selectors):
     selector = selectors.get(domain)
     
     if not selector:
+        logging.error(f"No selector found for {domain}")
         driver.quit()
         return None
+    
+    logging.info(f"using selector: {selector} for domain: {domain}")
 
     try:
         WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
@@ -66,7 +81,7 @@ def check_price(url, selectors):
         price = price_element.text
         return float(price.replace('R', '').replace(',', '').strip())
     except Exception as e:
-        print(f"Error finding price on {domain}: {e}")
+        logging.error(f"Error finding price / parsing price text on {domain}: {e}")
         return None
     finally:
         driver.quit()
@@ -77,20 +92,20 @@ def track_price_drop(url, email, initial_price):
         current_price = check_price(url, selectors)
         
         if current_price is None:
-            print("Failed to retrieve price.")
-            time.sleep(300)  # Wait before retrying
+            logging.warning(f"Failed to retrieve price for {url}. retrying in 5 min.")
+            time.sleep(300)  # Waits before retrying
             continue
 
-        print(f"Current price: R{current_price}, Initial price: R{initial_price}")
+        logging.info(f"Current price: R{current_price:.2f}, Initial price: R{initial_price}")
 
         if current_price < initial_price:
-            print("Price dropped!")
+            logging.info(f"Price dropped for {url} sending notification.")
             subject = "Price Drop Alert!"
-            body = f"The price for your product has dropped!\n\nNew price: R{current_price}\nCheck it out here: {url}"
+            body = f"The price for your product is now R{current_price:.2f}\nCheck it out here: {url}"
             send_email(subject, body, email_config['sender_email'], email_config['sender_password'], email)
-            break  # Stop tracking once the price drop email is sent
+            break  # Stops tracking once the price drop email is sent
 
-        time.sleep(300)  # Check every 5 minutes
+        time.sleep(300)  # Checks every 5 minutes
 
 @app.route('/track', methods=['POST'])
 def track_discount():
@@ -99,17 +114,31 @@ def track_discount():
     email = data.get('email')
 
     if not url or not email:
+        logging.error("Url or email missing in request")
         return jsonify({"error": "URL and email are required"}), 400
 
     initial_price = check_price(url, selectors)
     if initial_price is None:
+        logging.error(f"failed to retrieve initial price for {url}")
         return jsonify({"error": "Failed to retrieve price"}), 500
 
-    # Start the price tracking in a background thread
+    # Starts the price tracking in a background thread
     thread = threading.Thread(target=track_price_drop, args=(url, email, initial_price))
     thread.start()
 
+    logging.info(f"Tracking price for {url}")
     return jsonify({"message": "Tracking started. You will be notified if the price drops."}), 200
+
+# status route
+@app.route('/status', methods=['GET'])
+def status():
+    return jsonify({"message": "Service is running", "threads": threading.active_count()}), 200
+
+# home route
+@app.route('/')
+def home():
+    return "Price tracker is running!", 200
+
 
 if __name__ == "__main__":
     app.run(debug=True)
