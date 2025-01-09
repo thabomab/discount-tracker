@@ -1,4 +1,8 @@
 from flask import Flask, request, jsonify
+from celery_config import make_celery
+from logger_config import configure_logging
+from celery import shared_task
+from celery.exceptions import MaxRetriesExceededError
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -18,16 +22,16 @@ import logging
 
 app = Flask(__name__)
 
-# enable CORS for the app
-CORS(app)
+# Enable CORS for the specific frontend domain
+CORS(app, resources={r"/*": {"origins": "https://prcdrop.co.za"}})
 
-# configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    filename="prcdrop.log"
-)
+# Configure Celery
+celery = make_celery(app)
+
+# Configure logging
+configure_logging()
+logging.info("Service started.")
+
 
 # Setting up Chrome options for Selenium
 chrome_options = Options()
@@ -102,52 +106,67 @@ def check_price(url, selectors):
         driver.quit()
 
 # Background function to monitor price drop
-def track_price_drop(url, email):
-    initial_price = check_price(url, selectors)
-    if initial_price is None:
-        logging.error(f"Failed to retrieve initial price for {url}")
+@celery.task(bind=True, max_retries=5, default_retry_delay=300)
+def track_price_drop(self, url, email, initial_price=None):
+    logging.info(f"Tracking price drop for URL: {url}")
+    
+    try:
+        current_price = check_price(url, selectors)
+        if current_price is None:
+            raise ValueError(f"Failed to retrieve price for {url}")
+    except Exception as e:
+        logging.error(f"Error while checking price for {url}: {e}")
+        try:
+            self.retry(exc=e)  # Retry the task
+        except Exception:
+            logging.critical(f"Max retries exceeded for {url}. Stopping further attempts.")
         return
 
-    while True:
-        current_price = check_price(url, selectors)
-        
-        if current_price is None:
-            logging.warning(f"Failed to retrieve price for {url}. Retrying in 10 minutes.")
-            time.sleep(600)  # Wait before retrying
-            continue
+    if initial_price is None:
+        initial_price = current_price
+        logging.info(f"Initial price for {url} set to R{initial_price:.2f}")
 
-        logging.info(f"Current price: R{current_price:.2f}, Initial price: R{initial_price:.2f}")
-
-        if current_price < initial_price:
-            logging.info(f"Price dropped for {url}, sending notification.")
-            subject = "Price Drop Alert!"
-            body = f"The price for your product is now R{current_price:.2f}\n\nCheck it out here:\n{url}"
-            send_email(subject, body, email_config['sender_email'], email_config['sender_password'], email)
-            break  # Stop tracking once the price drop email is sent
-
-        time.sleep(12000)  # Check every 20 minutes
+    if current_price < initial_price:
+        logging.info(f"Price drop detected for {url}: Current Price = R{current_price:.2f}, Initial Price = R{initial_price:.2f}")
+        subject = "Price Drop Alert!"
+        body = f"The price for your product is now R{current_price:.2f}\n\nCheck it out here:\n{url}"
+        send_email(subject, body, email_config['sender_email'], email_config['sender_password'], email)
+        logging.info(f"Price drop email sent to {email}.")
+        return
+    else:
+        logging.info(f"No price drop detected for {url}. Current Price = R{current_price:.2f}, Initial Price = R{initial_price:.2f}")
+        logging.info("Re-scheduling price check in 20 minutes.")
+        self.apply_async((url, email, initial_price), countdown=1200)
 
 @app.route('/track', methods=['POST'])
 def track_discount():
-    data = request.get_json()
-    url = data.get('url')
-    email = data.get('email')
+    try:
+        data = request.get_json()
+        logging.info(f"Received tracking request: {data}")
+        url = data.get('url')
+        email = data.get('email')
 
-    if not url or not email:
-        logging.error("URL or email missing in request")
-        return jsonify({"error": "URL and email are required"}), 400
+        if not url or not email:
+            logging.error("URL or email missing in request")
+            return jsonify({"error": "URL and email are required"}), 400
 
-    # Start price tracking in a background thread
-    thread = threading.Thread(target=track_price_drop, args=(url, email))
-    thread.start()
-
-    logging.info(f"Tracking initiated for {url}")
-    return jsonify({"message": "Tracking started. You will be notified when the price drops."}), 200
+        # Start price tracking in a background thread
+        track_price_drop.delay(url, email)
+        logging.info(f"Tracking initiated for {url}")
+        return jsonify({"message": "Tracking started. You will be notified when the price drops."}), 200
+    except Exception as e:
+        logging.error(f"Error in /track endpoint: {e}")
+        return jsonify({"error": "An error occurred while processing your request."}), 500
 
 # Status route
 @app.route('/status', methods=['GET'])
 def status():
-    return jsonify({"message": "Service is running", "threads": threading.active_count()}), 200
+    return jsonify({
+        "message": "Service is running",
+        "threads": threading.active_count(),
+        "selectors_loaded": bool(selectors),
+        "email_config_valid": bool(email_config)
+    }), 200
 
 # Home route
 @app.route('/')
@@ -155,4 +174,4 @@ def home():
     return "Price tracker is running!", 200
 
 if __name__ == "__main__":
-    app.run(debug=False)
+    app.run(debug=True, port=80, host="0.0.0.0")
