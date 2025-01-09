@@ -23,7 +23,7 @@ CORS(app)
 
 # configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     filename="prcdrop.log"
@@ -155,4 +155,4 @@ def home():
     return "Price tracker is running!", 200
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)
