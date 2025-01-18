@@ -2,10 +2,12 @@
     "truworths.co.za": ".highlighted-text",
     "amazon.com": "#priceblock_ourprice",
     "superbalist.com": ".price",
-    "takealot.com": ".currency.plus.currency-module_currency_29IIm",
+    "takealot.com": "div.buybox-offer-module_single-item_18a_g[data-ref='price'] span.currency.plus.currency-module_currency_29IIm",
     "woolworths.co.za": ".price",
     "bash.com": ".vtex-product-price-1-x-currencyInteger",
     "incredible.co.za": ".price-wrapper .price",
     "makro.co.za": ".css-901oao.r-1qimiim.r-19aw4kv.r-a5pmau",
-    "amazon.co.za": ".a-price-whole"
+    "amazon.co.za": ".a-price-whole",
+    "courtorder.co.za": "span[data-product-price]",
+    "shelflife.co.za": "div.col > span.lead"
 }

@@ -97,13 +97,16 @@ def check_price(url, selectors):
         WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
         price_element = driver.find_element(By.CSS_SELECTOR, selector)
         logging.info(f"Price element text: {price_element.text}")
-        price = price_element.text
-        return float(price.replace('R', '').replace(',', '').strip())
+        price = (price_element.text.replace('R', '').replace(',', '').strip())
+        if '\n' in price:
+            price = price.split('\n')[0]
+        return float(price)
     except Exception as e:
         logging.error(f"Error finding price / parsing price text on {domain}: {e}")
         return None
     finally:
         driver.quit()
+
 
 # Background function to monitor price drop
 @celery.task(bind=True, max_retries=5, default_retry_delay=300)
@@ -131,7 +134,7 @@ def track_price_drop(self, url, email, initial_price=None):
         subject = "Price Drop Alert!"
         body = f"The price for your product is now R{current_price:.2f}\n\nCheck it out here:\n{url}"
         send_email(subject, body, email_config['sender_email'], email_config['sender_password'], email)
-        logging.info(f"Price drop email sent to {email}.")
+        logging.info("notification sent")
         return
     else:
         logging.info(f"No price drop detected for {url}. Current Price = R{current_price:.2f}, Initial Price = R{initial_price:.2f}")
@@ -142,14 +145,23 @@ def track_price_drop(self, url, email, initial_price=None):
 def track_discount():
     try:
         data = request.get_json()
-        logging.info(f"Received tracking request: {data}")
+        logging.info(f"Received tracking request: {data.get('url')}")
         url = data.get('url')
         email = data.get('email')
 
         if not url or not email:
             logging.error("URL or email missing in request")
             return jsonify({"error": "URL and email are required"}), 400
-
+        
+        # Adding more websites
+        domain = normalize_domain(urlparse(url).netloc)
+        if domain not in selectors:
+            logging.info(f"Add support for {domain}")
+            subject = "Website Support!"
+            body = f"Add website support for {domain}"
+            send_email(subject, body, email_config['sender_email'], email_config['sender_password'], email_config['support_email'])
+            return jsonify({"message": "This website is not supported yet. We are working to add it within 24 hours—please check back soon!"}), 200
+        
         # Start price tracking in a background thread
         track_price_drop.delay(url, email)
         logging.info(f"Tracking initiated for {url}")
@@ -157,6 +169,18 @@ def track_discount():
     except Exception as e:
         logging.error(f"Error in /track endpoint: {e}")
         return jsonify({"error": "An error occurred while processing your request."}), 500
+    
+# Updates CSS selectors
+@app.route('/reload-selectors', methods=['POST'])
+def reload_selectors():
+    global selectors  
+    selectors = load_json('price_selectors.json')
+    if not selectors:
+        logging.error("Failed to reload selectors.")
+        return jsonify({"error": "Failed to reload selectors"}), 500
+    logging.info("Selectors reloaded successfully.")
+    return jsonify({"message": "Selectors reloaded successfully!"}), 200
+
 
 # Status route
 @app.route('/status', methods=['GET'])
@@ -173,5 +197,3 @@ def status():
 def home():
     return "Price tracker is running!", 200
 
-if __name__ == "__main__":
-    app.run(debug=True, port=80, host="0.0.0.0")
